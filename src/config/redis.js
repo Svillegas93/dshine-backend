@@ -2,9 +2,8 @@ const { createClient } = require('redis');
 
 let client = null;
 
-async function connectRedis() {
-  console.log('REDIS_URL EN USO:', process.env.REDIS_URL);
- const url = 'rediss://default:gQAAAAAAAiN8AAIgcDFkMzMwNjkzMWE3NzU0YWFiYjM5ZDUwZWYzYjUyZTc5OQ@wise-monarch-140156.upstash.io:6379';
+async function connectRedis() 
+ const url = process.env.REDIS_URL || 'redis://localhost:6379';
 
   client = createClient({ url });
 
