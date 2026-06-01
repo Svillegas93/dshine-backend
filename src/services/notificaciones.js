@@ -160,7 +160,7 @@ async function enviarNotificaciones(reserva, cliente, servicio) {
   try {
     const waOk = await enviarWhatsApp(cliente.telefono, msg);
     if (!waOk) {
-      const sms = `D'SHINE: Cita ${reserva.codigo} confirmada. ${servicio.nombre} el ${reserva.fechaStr} a las ${reserva.horaInicio}. Pereira.`;
+      const sms = `D\'SHINE: Cita ${reserva.codigo} confirmada. ${servicio.nombre} el ${reserva.fechaStr} a las ${reserva.horaInicio}. Pereira.`;
       await enviarSMS(cliente.telefono, sms);
     }
   } catch(e) {
