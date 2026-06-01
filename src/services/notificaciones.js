@@ -171,7 +171,7 @@ async function enviarNotificaciones(reserva, cliente, servicio) {
   try {
     const adminPhone = process.env.ADMIN_PHONE;
     if (adminPhone) {
-      const adminMsg = `🔔 Nueva reser
+      const adminMsg = `Nueva reserva D-SHINE\n${reserva.codigo}\n${servicio.nombre}\n${cliente.nombre} - ${cliente.telefono}\n${formatearFecha(reserva.fechaStr)} ${reserva.horaInicio}`;
 
   // Notificar al cliente
   const waOk = await enviarWhatsApp(cliente.telefono, msg);
