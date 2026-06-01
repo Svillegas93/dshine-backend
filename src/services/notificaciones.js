@@ -157,6 +157,23 @@ async function enviarNotificaciones(reserva, cliente, servicio) {
   const msg = msgConfirmacion(reserva, cliente, servicio);
 
   // Notificar al cliente
+  try {
+    const waOk = await enviarWhatsApp(cliente.telefono, msg);
+    if (!waOk) {
+      const sms = `D'SHINE: Cita ${reserva.codigo} confirmada. ${servicio.nombre} el ${reserva.fechaStr} a las ${reserva.horaInicio}. Pereira.`;
+      await enviarSMS(cliente.telefono, sms);
+    }
+  } catch(e) {
+    console.error('[notificaciones] Error cliente:', e.message);
+  }
+
+  // Notificar al admin
+  try {
+    const adminPhone = process.env.ADMIN_PHONE;
+    if (adminPhone) {
+      const adminMsg = `🔔 Nueva reser
+
+  // Notificar al cliente
   const waOk = await enviarWhatsApp(cliente.telefono, msg);
   if (!waOk) {
     // Fallback SMS con mensaje corto
