@@ -53,7 +53,7 @@ async function slotDisponibleEnDB(servicioId, fechaStr, horaInicio) {
  */
 async function slotEnHorario(servicioId, fechaStr, horaInicio) {
   const diaNum = diaSemana(fechaStr);
-  const horario = await Disponibilidad.findOne({ diaSemana: diaNum }).lean();
+  const horario = await Disponibilidad.findOne({ diaSemana: diaNum }).lean();console.log('[slotEnHorario] diaNum:', diaNum, 'horario:', JSON.stringify(horario));
   if (!horario?.activo) return false;
 
   const excepcion = horario.excepciones?.find((e) => e.fecha === fechaStr);
