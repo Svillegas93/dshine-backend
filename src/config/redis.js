@@ -2,17 +2,17 @@ const { createClient } = require('redis');
 
 let client = null;
 
-async function connectRedis() 
- const url = process.env.REDIS_URL || 'redis://localhost:6379';
+async function connectRedis() {
+  const url = process.env.REDIS_URL || 'redis://localhost:6379';
 
   client = createClient({ url });
 
   client.on('error', (err) => {
-    console.error('❌  Redis error:', err.message);
+    console.error('Redis error:', err.message);
   });
 
   client.on('connect', () => {
-    console.log('✅  Redis conectado');
+    console.log('Redis conectado');
   });
 
   await client.connect();
