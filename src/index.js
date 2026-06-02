@@ -22,7 +22,9 @@ const serviciosRoutes       = require('./routes/servicios');
 const adminAuthRoutes      = require('./routes/admin/auth');
 const adminReservasRoutes  = require('./routes/admin/reservas');
 const adminServiciosRoutes = require('./routes/admin/servicios');
-const adminHorariosRoutes  = require('./routes/admin/horarios');
+const adminBloqueosRoutes  = require('./routes/admin/bloqueos');
+const adminConfigRoutes    = require('./routes/admin/config');
+const { getPromoActiva }   = require('./routes/admin/config');
 const { adminAuth }        = require('./middleware/adminAuth');
 
 const app  = express();
@@ -51,7 +53,9 @@ app.use('/api/servicios',      serviciosRoutes);
 app.use('/api/admin/auth',      adminAuthRoutes);
 app.use('/api/admin/reservas',  adminAuth, adminReservasRoutes);
 app.use('/api/admin/servicios', adminAuth, adminServiciosRoutes);
-app.use('/api/admin/horarios',  adminAuth, adminHorariosRoutes);
+app.use('/api/admin/bloqueos',  adminAuth, adminBloqueosRoutes);
+app.use('/api/admin/config',    adminAuth, adminConfigRoutes);
+app.get('/api/promo/activa',    getPromoActiva);
 
 // ── Health check ─────────────────────────────────────────────
 app.get('/health', (req, res) => {
