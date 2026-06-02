@@ -19,7 +19,7 @@
     "mongoose": "^8.0.3",
     "node-cron": "^3.0.3",
     "redis": "^4.6.11",
-    "twilio": "^4.19.3"
+    "twilio": "^4.19.3",
     "resend": "^4.0.0"
   },
   "devDependencies": {
