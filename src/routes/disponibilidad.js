@@ -13,9 +13,10 @@ const { query } = require('express-validator');
 const mongoose = require('mongoose');
 
 const Disponibilidad = require('../models/Disponibilidad');
-const Reserva = require('../models/Reserva');
-const Servicio = require('../models/Servicio');
-const { validate } = require('../middleware/validate');
+const Reserva        = require('../models/Reserva');
+const Servicio       = require('../models/Servicio');
+const Bloqueo        = require('../models/Bloqueo');
+const { validate }   = require('../middleware/validate');
 const {
   diaSemana,
   generarSlots,
@@ -26,6 +27,61 @@ const {
   sumarMinutos,
 } = require('../utils/fecha');
 const { getSlotsLocked } = require('../utils/slotLock');
+
+// ── Helpers de bloqueos ──────────────────────────────────────
+
+/**
+ * Verifica si una fecha está completamente bloqueada.
+ * Retorna true si hay un bloqueo de día completo (sin horas) que cubre esa fecha.
+ */
+async function fechaBloqueada(fecha) {
+  const bloqueo = await Bloqueo.findOne({
+    desdeFecha: { $lte: fecha },
+    hastaFecha: { $gte: fecha },
+    horaInicio: null,
+    activo: true,
+  }).lean();
+  return !!bloqueo;
+}
+
+/**
+ * Obtiene las horas bloqueadas parcialmente para una fecha.
+ * Retorna un Set con las horas (HH:mm) que caen dentro de algún bloqueo parcial.
+ */
+async function horasBloqueadas(fecha, slots, duracionMin) {
+  const bloqueos = await Bloqueo.find({
+    desdeFecha: { $lte: fecha },
+    hastaFecha: { $gte: fecha },
+    horaInicio: { $ne: null },
+    activo: true,
+  }).lean();
+
+  if (!bloqueos.length) return new Set();
+
+  const bloqueadas = new Set();
+  slots.forEach(slot => {
+    const [sh, sm] = slot.split(':').map(Number);
+    const slotMin = sh * 60 + sm;
+    const slotFinMin = slotMin + duracionMin;
+
+    bloqueos.forEach(b => {
+      const [bih, bim] = b.horaInicio.split(':').map(Number);
+      const bIniMin = bih * 60 + bim;
+      // Hora fin del bloqueo (si no tiene, bloquea hasta fin del día)
+      let bFinMin = 24 * 60;
+      if (b.horaFin) {
+        const [bfh, bfm] = b.horaFin.split(':').map(Number);
+        bFinMin = bfh * 60 + bfm;
+      }
+      // El slot se bloquea si se solapa con el rango de bloqueo
+      if (slotMin < bFinMin && slotFinMin > bIniMin) {
+        bloqueadas.add(slot);
+      }
+    });
+  });
+
+  return bloqueadas;
+}
 
 // ── Validadores ──────────────────────────────────────────────
 
@@ -63,14 +119,26 @@ router.get(
         return res.status(404).json({ ok: false, error: 'Servicio no encontrado' });
       }
 
-      // 2. Obtener horario del día de la semana
+      // 2. Verificar bloqueo de día completo
+      const diaCompleto = await fechaBloqueada(fecha);
+      if (diaCompleto) {
+        return res.json({
+          ok: true,
+          fecha,
+          abierto: false,
+          slots: [],
+          mensaje: 'No hay atención este día',
+        });
+      }
+
+      // 3. Obtener horario del día de la semana
       const diaNum = diaSemana(fecha);
       const horario = await Disponibilidad.findOne({ diaSemana: diaNum }).lean();
 
-      // 3. Verificar si el día tiene una excepción (festivo, etc.)
-      let abierto = horario?.activo ?? false;
+      // 4. Verificar si el día tiene una excepción (festivo, etc.)
+      let abierto  = horario?.activo ?? false;
       let apertura = horario?.horaApertura ?? '08:00';
-      let cierre = horario?.horaCierre ?? '19:00';
+      let cierre   = horario?.horaCierre   ?? '19:00';
       const duracion = servicio.duracionMin;
 
       if (horario?.excepciones?.length) {
@@ -78,7 +146,7 @@ router.get(
         if (excepcion) {
           abierto = excepcion.disponible;
           if (excepcion.horaApertura) apertura = excepcion.horaApertura;
-          if (excepcion.horaCierre) cierre = excepcion.horaCierre;
+          if (excepcion.horaCierre)   cierre   = excepcion.horaCierre;
         }
       }
 
@@ -92,43 +160,49 @@ router.get(
         });
       }
 
-      // 4. Generar todos los slots posibles del día
+      // 5. Generar todos los slots posibles del día
       let slots = generarSlots(apertura, cierre, duracion);
 
-      // 5. Filtrar slots que ya pasaron si es hoy
+      // 6. Filtrar slots que ya pasaron si es hoy
       slots = filtrarSlotsPasados(slots, fecha);
 
       if (!slots.length) {
         return res.json({ ok: true, fecha, abierto: true, slots: [] });
       }
 
-      // 6. Obtener reservas confirmadas/pendientes del día en paralelo con locks
-      const [reservasDelDia, slotsConLock] = await Promise.all([
+      // 7. Obtener reservas, locks y bloqueos parciales en paralelo
+      const [reservasDelDia, slotsConLock, bloqueadasParcial] = await Promise.all([
         Reserva.find({
           servicioId: new mongoose.Types.ObjectId(servicioId),
           fechaStr: fecha,
           estado: { $in: ['pendiente', 'confirmada'] },
-        })
-          .select('horaInicio')
-          .lean(),
+        }).select('horaInicio').lean(),
 
         getSlotsLocked(servicioId, fecha, slots),
+
+        horasBloqueadas(fecha, slots, duracion),
       ]);
 
-      // 7. Construir Set de horas ocupadas en DB
+      // 8. Construir Set de horas ocupadas en DB
       const ocupadosDB = new Set(reservasDelDia.map((r) => r.horaInicio));
 
-      // 8. Construir respuesta final con estado de cada slot
+      // 9. Construir respuesta final con estado de cada slot
       const slotsConEstado = slots.map((hora) => {
-        const ocupadoDB = ocupadosDB.has(hora);
-        const bloqueado = slotsConLock.has(hora);
+        const ocupadoDB  = ocupadosDB.has(hora);
+        const bloqueado  = slotsConLock.has(hora);
+        const bloqueoAdmin = bloqueadasParcial.has(hora);
 
         return {
           hora,
           horaFin: sumarMinutos(hora, duracion),
-          disponible: !ocupadoDB && !bloqueado,
-          // Para el frontend: distingue reservado (permanente) de bloqueado (temporal)
-          razon: ocupadoDB ? 'reservado' : bloqueado ? 'bloqueado' : null,
+          disponible: !ocupadoDB && !bloqueado && !bloqueoAdmin,
+          razon: ocupadoDB
+            ? 'reservado'
+            : bloqueado
+            ? 'bloqueado'
+            : bloqueoAdmin
+            ? 'no_disponible'
+            : null,
         };
       });
 
@@ -151,19 +225,15 @@ router.get(
 );
 
 // ── GET /api/disponibilidad/mes ──────────────────────────────
-// Devuelve qué días del mes tienen al menos 1 slot libre.
-// Útil para desactivar días en el calendario del frontend.
 
 router.get('/mes', validarMes, validate, async (req, res) => {
   try {
     const { anio, mes, servicioId } = req.query;
     const anioNum = parseInt(anio, 10);
-    const mesNum = parseInt(mes, 10); // 1-12
+    const mesNum  = parseInt(mes, 10);
 
-    // Días del mes
     const diasEnMes = new Date(anioNum, mesNum, 0).getDate();
 
-    // Construir lista de fechas "YYYY-MM-DD"
     const fechas = Array.from({ length: diasEnMes }, (_, i) => {
       const d = i + 1;
       return `${anio}-${String(mesNum).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
@@ -173,55 +243,88 @@ router.get('/mes', validarMes, validate, async (req, res) => {
       return res.json({ ok: true, diasDisponibles: [] });
     }
 
-    // Obtener servicio para saber duración
     const servicio = await Servicio.findById(servicioId).select('duracionMin activo').lean();
     if (!servicio?.activo) {
       return res.status(404).json({ ok: false, error: 'Servicio no encontrado' });
     }
 
-    // Obtener horarios de la semana de una sola vez
-    const horariosSemana = await Disponibilidad.find().lean();
+    // Obtener horarios, reservas del mes y bloqueos del mes en paralelo
+    const inicioMes = fechaStrToDate(fechas[0]);
+    const finMes    = fechaStrToDate(fechas[fechas.length - 1]);
+    finMes.setUTCDate(finMes.getUTCDate() + 1);
+
+    const [horariosSemana, reservasDelMes, bloqueosDelMes] = await Promise.all([
+      Disponibilidad.find().lean(),
+
+      Reserva.find({
+        servicioId: new mongoose.Types.ObjectId(servicioId),
+        fecha: { $gte: inicioMes, $lt: finMes },
+        estado: { $in: ['pendiente', 'confirmada'] },
+      }).select('fechaStr horaInicio').lean(),
+
+      Bloqueo.find({
+        desdeFecha: { $lte: fechas[fechas.length - 1] },
+        hastaFecha: { $gte: fechas[0] },
+        activo: true,
+      }).lean(),
+    ]);
+
     const horarioMap = {};
     horariosSemana.forEach((h) => { horarioMap[h.diaSemana] = h; });
 
-    // Obtener reservas del mes completo en una sola query
-    const inicioMes = fechaStrToDate(fechas[0]);
-    const finMes = fechaStrToDate(fechas[fechas.length - 1]);
-    finMes.setUTCDate(finMes.getUTCDate() + 1); // hasta el día siguiente
-
-    const reservasDelMes = await Reserva.find({
-      servicioId: new mongoose.Types.ObjectId(servicioId),
-      fecha: { $gte: inicioMes, $lt: finMes },
-      estado: { $in: ['pendiente', 'confirmada'] },
-    })
-      .select('fechaStr horaInicio')
-      .lean();
-
-    // Agrupar reservas por fecha
     const reservasPorFecha = {};
     reservasDelMes.forEach((r) => {
       if (!reservasPorFecha[r.fechaStr]) reservasPorFecha[r.fechaStr] = new Set();
       reservasPorFecha[r.fechaStr].add(r.horaInicio);
     });
 
-    // Para cada fecha, calcular si tiene al menos 1 slot libre
+    // Separar bloqueos de día completo y parciales
+    const bloqueoDiaCompleto = bloqueosDelMes.filter(b => !b.horaInicio);
+    const bloqueoParcial     = bloqueosDelMes.filter(b =>  b.horaInicio);
+
     const diasDisponibles = fechas.filter((fecha) => {
-      const diaNum = diaSemana(fecha);
+      // Verificar bloqueo de día completo
+      const bloqueado = bloqueoDiaCompleto.some(
+        b => b.desdeFecha <= fecha && b.hastaFecha >= fecha
+      );
+      if (bloqueado) return false;
+
+      const diaNum  = diaSemana(fecha);
       const horario = horarioMap[diaNum];
       if (!horario?.activo) return false;
 
-      // Verificar excepciones
       const excepcion = horario.excepciones?.find((e) => e.fecha === fecha);
       if (excepcion && !excepcion.disponible) return false;
 
       const apertura = excepcion?.horaApertura ?? horario.horaApertura;
-      const cierre = excepcion?.horaCierre ?? horario.horaCierre;
+      const cierre   = excepcion?.horaCierre   ?? horario.horaCierre;
 
       let slots = generarSlots(apertura, cierre, servicio.duracionMin);
       slots = filtrarSlotsPasados(slots, fecha);
 
       const ocupados = reservasPorFecha[fecha] || new Set();
-      return slots.some((s) => !ocupados.has(s));
+
+      // Verificar bloqueos parciales
+      return slots.some((slot) => {
+        if (ocupados.has(slot)) return false;
+        const [sh, sm] = slot.split(':').map(Number);
+        const slotMin    = sh * 60 + sm;
+        const slotFinMin = slotMin + servicio.duracionMin;
+
+        const bloqueadoParcial = bloqueoParcial.some(b => {
+          if (b.desdeFecha > fecha || b.hastaFecha < fecha) return false;
+          const [bih, bim] = b.horaInicio.split(':').map(Number);
+          const bIniMin = bih * 60 + bim;
+          let bFinMin = 24 * 60;
+          if (b.horaFin) {
+            const [bfh, bfm] = b.horaFin.split(':').map(Number);
+            bFinMin = bfh * 60 + bfm;
+          }
+          return slotMin < bFinMin && slotFinMin > bIniMin;
+        });
+
+        return !bloqueadoParcial;
+      });
     });
 
     res.json({ ok: true, anio: anioNum, mes: mesNum, diasDisponibles });
