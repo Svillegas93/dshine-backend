@@ -1,27 +1,26 @@
 /**
  * services/notificaciones.js
  *
- * Envia confirmaciones y recordatorios por WhatsApp (Twilio).
+ * Envía confirmaciones y recordatorios por WhatsApp (Twilio) + Email (Resend).
  * Si WhatsApp falla -> fallback a SMS.
  * Zona horaria: America/Bogota.
  */
 
 const twilio = require('twilio');
 const Reserva = require('../models/Reserva');
+const {
+  enviarEmailConfirmacion,
+  enviarEmailRecordatorio,
+  enviarEmailCancelacion,
+} = require('./email');
 
-// Dias y meses en espanol para los mensajes
-const DIAS = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
-const MESES = [
-  'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
-  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
-];
+const DIAS  = ['domingo','lunes','martes','miercoles','jueves','viernes','sabado'];
+const MESES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
 
 function formatearFecha(fechaStr) {
   const [anio, mes, dia] = fechaStr.split('-').map(Number);
   const d = new Date(Date.UTC(anio, mes - 1, dia));
-  const nombreDia  = DIAS[d.getUTCDay()];
-  const nombreMes  = MESES[mes - 1];
-  return `${nombreDia} ${dia} de ${nombreMes} de ${anio}`;
+  return `${DIAS[d.getUTCDay()]} ${dia} de ${MESES[mes - 1]} de ${anio}`;
 }
 
 let twilioClient = null;
@@ -67,7 +66,7 @@ async function enviarSMS(telefono, mensaje) {
   }
 }
 
-// -- Plantillas de mensajes
+// ── Plantillas WhatsApp ──────────────────────────────────────
 
 function msgConfirmacion(reserva, cliente, servicio) {
   const fecha = formatearFecha(reserva.fechaStr);
@@ -128,12 +127,12 @@ Nueva hora: ${reserva.horaInicio}
 Codigo: ${reserva.codigo}`;
 }
 
-// -- Funciones exportadas
+// ── Funciones exportadas ─────────────────────────────────────
 
 async function enviarNotificaciones(reserva, cliente, servicio) {
   const msg = msgConfirmacion(reserva, cliente, servicio);
 
-  // Notificar al cliente
+  // 1. WhatsApp al cliente (+ fallback SMS)
   try {
     const waOk = await enviarWhatsApp(cliente.telefono, msg);
     if (!waOk) {
@@ -141,10 +140,17 @@ async function enviarNotificaciones(reserva, cliente, servicio) {
       await enviarSMS(cliente.telefono, sms);
     }
   } catch(e) {
-    console.error('[notificaciones] Error cliente:', e.message);
+    console.error('[notificaciones] Error WA cliente:', e.message);
   }
 
-  // Notificar al admin
+  // 2. Email al cliente (si tiene email)
+  try {
+    await enviarEmailConfirmacion(reserva, cliente, servicio);
+  } catch(e) {
+    console.error('[notificaciones] Error email cliente:', e.message);
+  }
+
+  // 3. WhatsApp al admin
   try {
     const adminPhone = process.env.ADMIN_PHONE;
     if (adminPhone) {
@@ -152,7 +158,7 @@ async function enviarNotificaciones(reserva, cliente, servicio) {
       await enviarWhatsApp(adminPhone, adminMsg);
     }
   } catch(e) {
-    console.error('[notificaciones] Error admin:', e.message);
+    console.error('[notificaciones] Error WA admin:', e.message);
   }
 }
 
@@ -161,11 +167,15 @@ async function notificarCancelacion(reserva, cliente, servicioId) {
     const Servicio = require('../models/Servicio');
     const servicio = await Servicio.findById(servicioId).lean();
     if (!servicio) return;
+
     const msg = msgCancelacion(reserva, cliente, servicio);
     const waOk = await enviarWhatsApp(cliente.telefono, msg);
     if (!waOk) {
       await enviarSMS(cliente.telefono, `D-SHINE: Tu cita ${reserva.codigo} fue cancelada.`);
     }
+
+    // Email de cancelación
+    await enviarEmailCancelacion(reserva, cliente, servicio);
   } catch(e) {
     console.error('[notificaciones] Error cancelacion:', e.message);
   }
@@ -176,6 +186,7 @@ async function notificarReagendamiento(reserva, cliente, servicioId) {
     const Servicio = require('../models/Servicio');
     const servicio = await Servicio.findById(servicioId).lean();
     if (!servicio) return;
+
     const msg = msgReagendamiento(reserva, cliente, servicio);
     const waOk = await enviarWhatsApp(cliente.telefono, msg);
     if (!waOk) {
@@ -188,14 +199,14 @@ async function notificarReagendamiento(reserva, cliente, servicioId) {
 
 async function enviarRecordatorios(horasAntes) {
   try {
-    const { ahoraBogota, sumarMinutos } = require('../utils/fecha');
+    const { ahoraBogota } = require('../utils/fecha');
     const Servicio = require('../models/Servicio');
     const Cliente  = require('../models/Cliente');
 
-    const ahora     = ahoraBogota();
-    const objetivo  = new Date(ahora.getTime() + horasAntes * 60 * 60 * 1000);
-    const fechaStr  = objetivo.toISOString().slice(0, 10);
-    const horaStr   = `${String(objetivo.getHours()).padStart(2,'0')}:${String(objetivo.getMinutes()).padStart(2,'0')}`;
+    const ahora    = ahoraBogota();
+    const objetivo = new Date(ahora.getTime() + horasAntes * 60 * 60 * 1000);
+    const fechaStr = objetivo.toISOString().slice(0, 10);
+    const horaStr  = `${String(objetivo.getHours()).padStart(2,'0')}:${String(objetivo.getMinutes()).padStart(2,'0')}`;
 
     const reservas = await Reserva.find({
       fechaStr,
@@ -210,12 +221,17 @@ async function enviarRecordatorios(horasAntes) {
       const servicio = await Servicio.findById(reserva.servicioId).lean();
       if (!cliente || !servicio) continue;
 
+      // WhatsApp
       const msg = msgRecordatorio(reserva, cliente, servicio, horasAntes);
       const waOk = await enviarWhatsApp(cliente.telefono, msg);
       if (!waOk) {
-        await enviarSMS(cliente.telefono, `D-SHINE: Recordatorio cita ${reserva.codigo} manana ${reserva.fechaStr} a las ${reserva.horaInicio}.`);
+        await enviarSMS(cliente.telefono, `D-SHINE: Recordatorio cita ${reserva.codigo} el ${reserva.fechaStr} a las ${reserva.horaInicio}.`);
       }
 
+      // Email
+      await enviarEmailRecordatorio(reserva, cliente, servicio, horasAntes);
+
+      // Marcar como enviado
       const update = horasAntes === 24
         ? { 'notificaciones.recordatorio24h': true }
         : { 'notificaciones.recordatorio1h':  true };
